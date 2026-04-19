@@ -1,0 +1,6 @@
+paddleocr==2.7.3
+opencv-python
+mss
+PyQt5
+keyboard
+numpy

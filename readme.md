@@ -9,18 +9,24 @@ https://github.com/snkrsubscriberdqh/BidKingCalculator.git
 
 ## 快速上手（3 分钟）
 
-### Windows（推荐）
+### Windows + Git Bash（推荐）
 
-1. 进入仓库根目录，执行初始化（自动创建 `.venv` 并安装依赖）
+1. 进入仓库根目录，执行初始化（自动创建 conda 环境并安装依赖）
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+```bash
+bash scripts/setup.sh --env-name bidking --python-version 3.11
 ```
 
 2. 一键启动 UI
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\start.ps1
+```bash
+bash scripts/start.sh --env-name bidking
+```
+
+3. 如果需要 OCR 依赖
+
+```bash
+bash scripts/setup.sh --env-name bidking --python-version 3.11 --with-ocr
 ```
 
 ### 通用命令行方式（Linux/macOS/Windows）

@@ -5,9 +5,11 @@ import streamlit as st
 
 from src.data_loader import (
     load_grid_size_options_by_grade,
+    load_item_grade_mapping,
     load_price_pools,
 )
-from src.models import GradeGridTotalClue, PriceAvgClue, SolverConstraints
+from src.clue_loader import load_silhouette_dict
+from src.models import GradeGridTotalClue, PriceAvgClue, SilhouetteClue, SolverConstraints
 from src.simulator import CalculationCancelledError, run_monte_carlo
 from src.solver import solve_valid_combinations
 
@@ -26,6 +28,16 @@ def get_grid_size_options(data_dir: str):
     return load_grid_size_options_by_grade(data_dir)
 
 
+@st.cache_resource
+def get_item_grade_mapping(data_dir: str):
+    return load_item_grade_mapping(data_dir)
+
+
+@st.cache_resource
+def get_silhouette_dict(data_dir: str):
+    return load_silhouette_dict(data_dir)
+
+
 default_data_dir = str((Path(__file__).parent / "data").resolve())
 
 
@@ -42,6 +54,8 @@ def _init_state() -> None:
         st.session_state.global_grid_total_clues = []
     if "exact_count_clues" not in st.session_state:
         st.session_state.exact_count_clues = []
+    if "silhouette_clues" not in st.session_state:
+        st.session_state.silhouette_clues = []
     if "calc_cancel_requested" not in st.session_state:
         st.session_state.calc_cancel_requested = False
     if "calc_running" not in st.session_state:
@@ -64,6 +78,20 @@ try:
     grid_size_options = get_grid_size_options(data_dir)
 except Exception as exc:
     grid_size_err = str(exc)
+
+item_grade_mapping = {}
+item_grade_mapping_err = None
+try:
+    item_grade_mapping = get_item_grade_mapping(data_dir)
+except Exception as exc:
+    item_grade_mapping_err = str(exc)
+
+silhouette_dict = {}
+silhouette_err = None
+try:
+    silhouette_dict = get_silhouette_dict(data_dir)
+except Exception as exc:
+    silhouette_err = str(exc)
 
 st.markdown("## 输入与配置")
 main_left, main_right = st.columns([2, 1], gap="large")
@@ -100,7 +128,10 @@ with main_left:
     st.markdown("### 添加附加线索")
     clue_col_1, clue_col_2, clue_col_3 = st.columns([2, 1, 1])
     with clue_col_1:
-        clue_type = st.selectbox("线索类型", ["等级下限", "等级上限", "等级精确个数", "等级均价", "等级总格数(背包)", "藏品占用总格数"])
+        clue_type = st.selectbox(
+            "线索类型",
+            ["等级下限", "等级上限", "等级精确个数", "等级均价", "等级总格数(背包)", "藏品占用总格数", "轮廓候选等级"],
+        )
     with clue_col_2:
         clue_grade = st.selectbox("等级", [1, 2, 3, 4, 5, 6], format_func=_grade_name)
     with clue_col_3:
@@ -119,12 +150,39 @@ with main_left:
             st.info("该等级未检测到格数列数据，将使用手动输入。")
     if clue_type == "藏品占用总格数":
         st.caption("该线索会约束整箱所有藏品的总格数。")
+
+    silhouette_keys = sorted(list(silhouette_dict.keys()))
+    silhouette_key = st.selectbox(
+        "轮廓ID",
+        silhouette_keys,
+        index=0,
+        disabled=(clue_type != "轮廓候选等级" or not silhouette_keys),
+    )
+    silhouette_min_exist = st.number_input(
+        "该轮廓至少出现件数",
+        min_value=1,
+        value=1,
+        step=1,
+        disabled=(clue_type != "轮廓候选等级"),
+    )
+    if clue_type == "轮廓候选等级":
+        if silhouette_err:
+            st.warning(f"轮廓字典加载失败: {silhouette_err}")
+        elif not silhouette_keys:
+            st.info("未找到 silhouette_dict.json，轮廓线索暂不可用。")
+        else:
+            current = silhouette_dict.get(silhouette_key, {})
+            st.caption(
+                f"候选等级: {current.get('grades', [])}，候选ItemID数: {len(current.get('item_ids', []))}"
+            )
+            if item_grade_mapping_err:
+                st.caption(f"Item_ID->等级映射加载失败: {item_grade_mapping_err}")
     grid_sizes_text = st.text_input(
         "候选格数集合(逗号分隔)",
         value=(",".join(str(x) for x in auto_grid_sizes) if auto_grid_sizes else "1,2,3"),
         disabled=(clue_type != "等级总格数(背包)" or bool(auto_grid_sizes)),
     )
-    st.caption("说明: 轮廓候选等级线索已暂时冻结，请改用“等级精确个数”。")
+    st.caption("说明: 轮廓线索会约束“候选等级总出现次数”至少达到指定件数。")
 
     if st.button("添加线索", use_container_width=True):
         if clue_type == "等级下限":
@@ -161,6 +219,29 @@ with main_left:
                 st.error(f"背包线索添加失败: {exc}")
         elif clue_type == "藏品占用总格数":
             st.session_state.global_grid_total_clues.append({"value": int(clue_value)})
+        elif clue_type == "轮廓候选等级":
+            if not silhouette_keys:
+                st.error("未检测到可用轮廓字典，请先准备 data/silhouette_dict.json")
+            else:
+                payload = silhouette_dict.get(silhouette_key, {})
+                candidate_grades = [int(x) for x in payload.get("grades", [])]
+                candidate_item_ids = [int(x) for x in payload.get("item_ids", [])]
+                for item_id in candidate_item_ids:
+                    mapped_grade = item_grade_mapping.get(item_id)
+                    if mapped_grade is not None:
+                        candidate_grades.append(int(mapped_grade))
+                candidate_grades = sorted(set(candidate_grades))
+                if not candidate_grades:
+                    st.error("该轮廓未解析到有效候选等级，无法添加。")
+                else:
+                    st.session_state.silhouette_clues.append(
+                        {
+                            "source_id": silhouette_key,
+                            "candidate_grades": candidate_grades,
+                            "candidate_item_ids": candidate_item_ids,
+                            "min_exist_count": int(silhouette_min_exist),
+                        }
+                    )
 
 with main_right:
     st.markdown("### 当前线索")
@@ -171,6 +252,7 @@ with main_right:
         st.session_state.price_avg_clues = []
         st.session_state.grid_total_clues = []
         st.session_state.global_grid_total_clues = []
+        st.session_state.silhouette_clues = []
         st.rerun()
 
     for idx, clue in enumerate(st.session_state.min_count_clues):
@@ -225,6 +307,15 @@ with main_right:
         )
         if c2.button("删", key=f"del_exact_{idx}"):
             st.session_state.exact_count_clues.pop(idx)
+            st.rerun()
+
+    for idx, clue in enumerate(st.session_state.silhouette_clues):
+        c1, c2 = st.columns([6, 1])
+        c1.caption(
+            f"轮廓[{clue['source_id']}] 候选等级={clue['candidate_grades']}，至少出现 {clue['min_exist_count']} 件"
+        )
+        if c2.button("删", key=f"del_silhouette_{idx}"):
+            st.session_state.silhouette_clues.pop(idx)
             st.rerun()
 
     st.markdown("### 模拟参数")
@@ -396,6 +487,16 @@ if run_btn:
         for clue in st.session_state.grid_total_clues
     ]
 
+    silhouette_clues = [
+        SilhouetteClue(
+            candidate_grades=[int(x) for x in clue.get("candidate_grades", [])],
+            candidate_item_ids=[int(x) for x in clue.get("candidate_item_ids", [])],
+            source_id=clue.get("source_id"),
+            min_exist_count=int(clue.get("min_exist_count", 1)),
+        )
+        for clue in st.session_state.silhouette_clues
+    ]
+
     global_total_grid = None
     for clue in st.session_state.global_grid_total_clues:
         value = int(clue["value"])
@@ -418,6 +519,7 @@ if run_btn:
         exact_count_by_grade=exact_count_by_grade,
         price_avg_clues=price_avg_clues,
         grade_grid_total_clues=grid_total_clues,
+        silhouette_clues=silhouette_clues,
     )
 
     valid_combinations = solve_valid_combinations(constraints, pools)
